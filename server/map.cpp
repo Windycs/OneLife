@@ -6915,26 +6915,26 @@ void mapEveDeath( const char *inEmail, double inAge, GridPos inDeathMapPos ) {
     
     int result = eveDBGet( inEmail, &pX, &pY, &pR );
     
-    if( result == 1 && pR > 0 ) {
-        
-        // don't keep growing radius after it gets too big
-        // if one player is dying young over and over, they will
-        // eventually overflow 32-bit integers
-
-        if( inAge < 16 && pR < 1024 ) {
-            pR *= 2;
-            }
-        else if( inAge > 20 ) {
-            pR = eveRadiusStart;
-            }
-        }
-    else {
-        // not found in DB
-        
-        // must overwrite no matter what
-        pR = eveRadiusStart;
-        }
-
+//    if( result == 1 && pR > 0 ) {
+//
+//        // don't keep growing radius after it gets too big
+//        // if one player is dying young over and over, they will
+//        // eventually overflow 32-bit integers
+//
+//        if( inAge < 16 && pR < 1024 ) {
+//            pR *= 2;
+//            }
+//        else if( inAge > 20 ) {
+//            pR = eveRadiusStart;
+//            }
+//        }
+//    else {
+//        // not found in DB
+//
+//        // must overwrite no matter what
+//        pR = eveRadiusStart;
+//        }
+    pR = eveRadiusStart;
 
     // their next camp will start where they last died
     pX = inDeathMapPos.x;
