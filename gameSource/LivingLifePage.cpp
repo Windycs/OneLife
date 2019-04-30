@@ -8093,16 +8093,119 @@ void LivingLifePage::draw( doublePair inViewCenter,
                             stripDescriptionComment( desNoComment );
 
                             // a grave we know about
-                            des = autoSprintf( "%s %s %s",
+                            int years = 
+                                lrint( 
+                                    ( game_getCurrentTime() - 
+                                      gI->creationTime ) *
+                                    ourLiveObject->ageRate );
+
+                            if( gI->creationTimeUnknown ) {
+                                years = 0;
+                                }
+
+                            double currentTime = game_getCurrentTime();
+                            
+                            if( gI->lastMouseOverYears != -1 &&
+                                currentTime - gI->lastMouseOverTime < 2 ) {
+                                // continuous mouse-over
+                                // don't let years tick up
+                                years = gI->lastMouseOverYears;
+                                gI->lastMouseOverTime = currentTime;
+                                }
+                            else {
+                                // save it for next time
+                                gI->lastMouseOverYears = years;
+                                gI->lastMouseOverTime = currentTime;
+                                }
+                            
+                            const char *yearWord;
+                            if( years == 1 ) {
+                                yearWord = translate( "yearAgo" );
+                                }
+                            else {
+                                yearWord = translate( "yearsAgo" );
+                                }
+                            
+                            char *yearsString;
+                            
+                            if( years > 20 ) {
+                                if( years > 1000000 ) {
+                                    int mil = years / 1000000;
+                                    int remain = years % 1000000;
+                                    int thou = remain / 1000;
+                                    int extra = remain % 1000;
+                                    yearsString = 
+                                        autoSprintf( "%d,%d,%d", 
+                                                     mil, thou, extra );
+                                    }
+                                else if( years > 1000 ) {
+                                    yearsString = 
+                                        autoSprintf( "%d,%d", 
+                                                     years / 1000,
+                                                     years % 1000 );
+                                    }
+                                else {
+                                    yearsString = autoSprintf( "%d", years );
+                                    }
+                                }
+                            else {
+                                const char *numberKeys[21] = { 
+                                    "zero",
+                                    "one",
+                                    "two",
+                                    "three",
+                                    "four",
+                                    "five",
+                                    "six",
+                                    "seven",
+                                    "eight",
+                                    "nine",
+                                    "ten",
+                                    "eleven",
+                                    "twelve",
+                                    "thirteen",
+                                    "fourteen",
+                                    "fifteen",
+                                    "sixteen",
+                                    "seventeen",
+                                    "eighteen",
+                                    "nineteen",
+                                    "twenty"
+                                    };
+                                yearsString = stringDuplicate( 
+                                    translate( numberKeys[ years ] ) );
+                                }
+                            
+
+
+                            char *deathPhrase;
+                            
+                            if( years == 0 ) {
+                                deathPhrase = stringDuplicate( "" );
+                                }
+                            else {
+                                deathPhrase = 
+                                    autoSprintf( " - %s %s %s",
+                                                 translate( "died" ),
+                                                 yearsString, yearWord );
+                                }
+
+                            delete [] yearsString;
+                            
+                            des = autoSprintf( "%s %s %s%s",
                                                desNoComment, translate( "of" ),
-                                               gI->relationName );
+                                               gI->relationName,
+                                               deathPhrase );
                             delete [] desNoComment;
+                            delete [] deathPhrase;
                             
                             desToDelete = des;
                             found = true;
                             break;
                             }    
                         }
+                    
+                        
 
                     if( !found ) {
 
@@ -10892,7 +10995,11 @@ void LivingLifePage::step() {
                     GraveInfo g;
                     g.worldPos.x = posX;
                     g.worldPos.y = posY;
-
+                    g.creationTime = game_getCurrentTime();
+                    g.creationTimeUnknown = false;
+                    g.lastMouseOverYears = -1;
+                    g.lastMouseOverTime = g.creationTime;
+                    
                     char *des = gravePerson->relationName;
                     char *desToDelete = NULL;
                     
@@ -11068,6 +11175,20 @@ void LivingLifePage::step() {
                 if( desToDelete != NULL ) {
                     delete [] desToDelete;
                     }
+                
+                g.creationTime = 
+                    game_getCurrentTime() - age / ourLiveObject->ageRate;
+                
+                if( age == -1 ) {
+                    g.creationTime = 0;
+                    g.creationTimeUnknown = true;
+                    }
+                else {
+                    g.creationTimeUnknown = false;
+                    }
+                
+                g.lastMouseOverYears = -1;
+                g.lastMouseOverTime = g.creationTime;
                 
                 mGraveInfo.push_back( g );
                 }

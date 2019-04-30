@@ -3,6 +3,23 @@ This file only list changes to game code.  Changes to content can be found here:
 http://onehouronelife.com/updateLog.php
 
 
+Version 220    ???
+
+--Server now reports death-age in GRAVE_OLD message, and client now displays
+  how long person has been dead on grave mouse-over.
+
+
+Server Fixes:
+
+--Daily mass disconnect issue:  rolling the servers log.txt over was using a
+  copy operation, and for a 2.9 GB log file, this was stalling the server for
+  20 seconds.  Switched to a move operation instead, which is instantaneous.
+
+--Fixed a bunch of bugs in way old graves and moving graves are tracked.
+
+
+
+
 Version 219    2019-April-27
 
 --Fixed bug that cause chat sheet to not appear if another field was focused.
