@@ -626,6 +626,9 @@ SimpleVector<GridPos> recentlyRemovedOwnerPos;
 
 
 void removeAllOwnership( LiveObject *inPlayer ) {
+    double startTime = Time::getCurrentTime();
+    int num = inPlayer->ownedPositions.size();
+    
     for( int i=0; i<inPlayer->ownedPositions.size(); i++ ) {
         GridPos *p = inPlayer->ownedPositions.getElement( i );
 
@@ -666,6 +669,13 @@ void removeAllOwnership( LiveObject *inPlayer ) {
                 }
             }
         }
+    
+    inPlayer->ownedPositions.deleteAll();
+
+    AppLog::infoF( "Removing all ownership (%d owned) for "
+                   "player %d (%s) took %lf sec",
+                   num, inPlayer->id, inPlayer->email, 
+                   Time::getCurrentTime() - startTime );
     }
 
 
@@ -1218,6 +1228,8 @@ void quitCleanup() {
 
     for( int i=0; i<players.size(); i++ ) {
         LiveObject *nextPlayer = players.getElement(i);
+        
+        removeAllOwnership( nextPlayer );
 
         if( nextPlayer->sock != NULL ) {
             delete nextPlayer->sock;
@@ -1260,9 +1272,7 @@ void quitCleanup() {
 
 
         delete nextPlayer->babyBirthTimes;
-        delete nextPlayer->babyIDs;
-        
-        removeAllOwnership( nextPlayer );
+        delete nextPlayer->babyIDs;        
         }
     players.deleteAll();
 
@@ -1911,12 +1921,15 @@ ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
         }
     
     // incoming client messages are relative to birth pos
-    m.x += inPlayer->birthPos.x;
-    m.y += inPlayer->birthPos.y;
+    // except NOT map pull messages, which are absolute
+    if( m.type != MAP ) {    
+        m.x += inPlayer->birthPos.x;
+        m.y += inPlayer->birthPos.y;
 
-    for( int i=0; i<m.numExtraPos; i++ ) {
-        m.extraPos[i].x += inPlayer->birthPos.x;
-        m.extraPos[i].y += inPlayer->birthPos.y;
+        for( int i=0; i<m.numExtraPos; i++ ) {
+            m.extraPos[i].x += inPlayer->birthPos.x;
+            m.extraPos[i].y += inPlayer->birthPos.y;
+            }
         }
 
     return m;
@@ -9198,13 +9211,25 @@ int main() {
                     
 
                     if( allow && nextPlayer->connected ) {
+                        
+                        // keep them full of food so they don't 
+                        // die of hunger during the pull
+                        nextPlayer->foodStore = 
+                            computeFoodCapacity( nextPlayer );
+                        
+
                         int length;
+
+                        // map chunks sent back to client absolute
+                        // relative to center instead of birth pos
+                        GridPos centerPos = { 0, 0 };
+                        
                         unsigned char *mapChunkMessage = 
                             getChunkMessage( m.x - chunkDimensionX / 2, 
                                              m.y - chunkDimensionY / 2,
                                              chunkDimensionX,
                                              chunkDimensionY,
-                                             nextPlayer->birthPos,
+                                             centerPos,
                                              &length );
                         
                         int numSent = 
@@ -12935,6 +12960,8 @@ int main() {
                 }
             else if( nextPlayer->error && ! nextPlayer->deleteSent ) {
                 
+                removeAllOwnership( nextPlayer );
+
                 if( nextPlayer->heldByOther ) {
                     
                     handleForcedBabyDrop( nextPlayer,
@@ -14901,6 +14928,24 @@ int main() {
                     }
 
                 
+                // next send info about valley lines
+
+                int valleySpacing = 
+                    SettingsManager::getIntSetting( "valleySpacing", 40 );
+                                  
+                char *valleyMessage = 
+                    autoSprintf( "VS\n"
+                                 "%d %d\n#",
+                                 valleySpacing,
+                                 nextPlayer->birthPos.y % valleySpacing );
+                
+                sendMessageToPlayer( nextPlayer, 
+                                     valleyMessage, strlen( valleyMessage ) );
+                
+                delete [] valleyMessage;
+                
+
+
                 SimpleVector<int> outOfRangePlayerIDs;
                 
 
@@ -16408,19 +16453,6 @@ int main() {
         // handle closing any that have an error
         for( int i=0; i<players.size(); i++ ) {
             LiveObject *nextPlayer = players.getElement(i);
-            
-            if( nextPlayer->error ) {
-                // do this immediately when a player dies
-                // don't wait until we're about to delete them
-                // takes too long
-                
-                // note that we will do this multiple times as
-                // we wait for their deleteSentDoneETA
-                //
-                // that's okay, because subsequent calls to this are cheap
-                removeAllOwnership( nextPlayer );
-                }
-            
 
             if( nextPlayer->error && nextPlayer->deleteSent &&
                 nextPlayer->deleteSentDoneETA < Time::getCurrentTime() ) {
