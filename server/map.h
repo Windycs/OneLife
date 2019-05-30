@@ -56,7 +56,8 @@ void resetEveRadius();
 // gets new Eve position on outskirts of civilization
 // if inAllowRespawn, this player's last Eve old-age-death will be
 // considered.
-void getEvePosition( const char *inEmail, int *outX, int *outY, 
+void getEvePosition( const char *inEmail, int inID, int *outX, int *outY,
+                     SimpleVector<GridPos> *inOtherPeoplePos,
                      char inAllowRespawn = true );
 
 
@@ -296,6 +297,12 @@ GridPos getNextFlightLandingPos( int inCurrentX, int inCurrentY,
 int getGravePlayerID( int inX, int inY );
 
 void setGravePlayerID( int inX, int inY, int inPlayerID );
+
+
+
+// culling regions of map that haven't been seen in a long time
+void stepMapLongTermCulling( int inNumCurrentPlayers );
+
 
 
 #endif

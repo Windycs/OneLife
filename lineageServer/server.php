@@ -357,6 +357,7 @@ function ls_setupDatabase() {
             // 0 for Eve
             // the Eve of this family line
             "eve_life_id INT NOT NULL,".
+            "INDEX( eve_life_id ),".
             // both -1 if not set
             // 0 if set and empty
             "deepest_descendant_generation INT NOT NULL,".
@@ -1568,6 +1569,12 @@ function ls_frontPage() {
             }
         }
     
+
+    $tooManyNameMatches = false;
+    $numNameMatches = 0;
+
+    $forceIndexClause = "";
+    
     
 
     if( $email_sha1 != "" ) {
@@ -1592,6 +1599,28 @@ function ls_frontPage() {
         $filterClause = " WHERE lives.name LIKE '$nameFilter%' ";
         $filter = $nameFilter;
         $customFilterSet = true;
+
+
+        // make sure there aren't too many
+        global $tableNamePrefix;
+        $query = "SELECT COUNT(*) from $tableNamePrefix"."lives as lives ".
+            "$filterClause";
+
+        $result = ls_queryDatabase( $query );
+        $numNameMatches = ls_mysqli_result( $result, 0, 0 );
+
+        if( $numNameMatches > 30000 ) {
+            $filterClause = " WHERE 1 ";
+            $tooManyNameMatches = true;
+            }
+        else {
+            // not too many
+            // force index on name to keep it fast
+            // (otherwise, we sort by another criteria on front page
+            // and may only find name matches at bottom of list of millions)
+            $forceIndexClause = " FORCE INDEX( name ) ";
+            }
+        
         }
 
     
@@ -1627,7 +1656,12 @@ function ls_frontPage() {
         $rootFilterClause = " WHERE generation = 1 ";
         }
 
-                 
+
+    if( $tooManyNameMatches ) {
+        echo "<br><br>Too many matches ($numNameMatches) for ".
+            "name '$nameFilter'<br><br>";
+        }
+    
     
     echo "<table border=0 cellpadding=20>";
 
@@ -1638,7 +1672,8 @@ function ls_frontPage() {
     echo "<tr><td colspan=6>".
         "<font size=5>Recent Elder Deaths:</font></td></tr>\n";
 
-    ls_printFrontPageRows( "$filterClause AND age >= 50", "death_time DESC",
+    ls_printFrontPageRows( $forceIndexClause,
+                           "$filterClause AND age >= 50", "death_time DESC",
                            $numPerList );
 
 
@@ -1646,6 +1681,7 @@ function ls_frontPage() {
         "</font></td></tr>\n";
     
     ls_printFrontPageRows(
+        $forceIndexClause,
         "$rootFilterClause AND death_time >= DATE_SUB( NOW(), INTERVAL 1 DAY )",
         "lineage_depth DESC, death_time DESC",
         $numPerList );
@@ -1654,7 +1690,8 @@ function ls_frontPage() {
     echo "<tr><td colspan=6>".
         "<font size=5>Recent Adult Deaths:</font></td></tr>\n";
 
-    ls_printFrontPageRows( "$filterClause AND age >= 20 AND age < 50",
+    ls_printFrontPageRows( $forceIndexClause,
+                           "$filterClause AND age >= 20 AND age < 50",
                            "death_time DESC",
                            $numPerList );
 
@@ -1662,7 +1699,8 @@ function ls_frontPage() {
     echo "<tr><td colspan=6>".
         "<font size=5>Recent Youth Deaths:</font></td></tr>\n";
     
-    ls_printFrontPageRows( "$filterClause AND age < 20", "death_time DESC",
+    ls_printFrontPageRows( $forceIndexClause,
+                           "$filterClause AND age < 20", "death_time DESC",
                            $numPerList );
 
 
@@ -1671,6 +1709,7 @@ function ls_frontPage() {
         "</font></td></tr>\n";
     
     ls_printFrontPageRows(
+        $forceIndexClause,
         "$rootFilterClause AND ".
         "death_time >= DATE_SUB( NOW(), INTERVAL 1 WEEK )",
         "lineage_depth DESC, death_time DESC",
@@ -1681,6 +1720,7 @@ function ls_frontPage() {
         "</font></td></tr>\n";
     
     ls_printFrontPageRows(
+        $forceIndexClause,
         $rootFilterClause,
         "lineage_depth DESC, death_time DESC",
         $numPerList );
@@ -1689,8 +1729,20 @@ function ls_frontPage() {
     
     echo "<tr><td colspan=6><font size=5>Today's Long Lines:".
         "</font></td></tr>\n";
+
+    $specialForceIndexClause = $forceIndexClause;
+
+    if( $specialForceIndexClause == "" ) {
+        // we need to speed this query up by forcing an index on death_time
+        // otherwise, mysql orders them by generation number first, and
+        // then walks through to find $numPerList with matching death times
+        // there are way too many long lines beyond what we will have
+        // today, so this is a lot to walk through
+        $specialForceIndexClause = " FORCE INDEX( death_time ) ";
+        }
     
     ls_printFrontPageRows(
+        $specialForceIndexClause,
         "$filterClause AND death_time >= DATE_SUB( NOW(), INTERVAL 1 DAY )",
         "generation DESC, death_time DESC",
         $numPerList );
@@ -1700,6 +1752,7 @@ function ls_frontPage() {
         "</font></td></tr>\n";
     
     ls_printFrontPageRows(
+        $forceIndexClause,
         "$filterClause AND death_time >= DATE_SUB( NOW(), INTERVAL 1 WEEK )",
         "generation DESC, death_time DESC",
         $numPerList );
@@ -1709,7 +1762,8 @@ function ls_frontPage() {
     echo "<tr><td colspan=6><font size=5>All-Time Long Lines:".
         "</font></td></tr>\n";
     
-    ls_printFrontPageRows( $filterClause, "generation DESC, death_time DESC",
+    ls_printFrontPageRows( $forceIndexClause,
+                           $filterClause, "generation DESC, death_time DESC",
                            $numPerList );
 
 
@@ -1738,15 +1792,18 @@ function ls_getGrayPercent( $inDeathAgoSec ) {
 
 
 
-function ls_printFrontPageRows( $inFilterClause, $inOrderBy, $inNumRows ) {
+function ls_printFrontPageRows( $inForceIndexClause,
+                                $inFilterClause, $inOrderBy, $inNumRows ) {
     global $tableNamePrefix;
     global $photoServerURL, $usePhotoServer;
-    
+
+    $startTime = microtime( true );
 
     $query = "SELECT lives.id, display_id, player_id, name, ".
         "age, generation, death_time, deepest_descendant_generation, ".
         "servers.server " .
         "FROM $tableNamePrefix"."lives as lives ".
+        " $inForceIndexClause ".
         "INNER JOIN $tableNamePrefix"."users as users ".
         "ON lives.user_id = users.id ".
         "INNER JOIN $tableNamePrefix"."servers as servers ".
@@ -1754,7 +1811,6 @@ function ls_printFrontPageRows( $inFilterClause, $inOrderBy, $inNumRows ) {
         "$inFilterClause ".
         "ORDER BY $inOrderBy ".
         "LIMIT $inNumRows;";
-    ls_log( $query );
     
     
     $result = ls_queryDatabase( $query );
@@ -1866,6 +1922,21 @@ function ls_printFrontPageRows( $inFilterClause, $inOrderBy, $inNumRows ) {
         echo "</tr>";
         }
 
+    $runTime = microtime( true ) - $startTime;
+
+    $runTimeMS = number_format( $runTime * 1000, 0 );
+    
+    $plural = "";
+    if( $runTimeMS != 1 ) {
+        $plural = "s";
+        }
+    
+    echo "<tr><td colspan=6 align=right>".
+        "(query took $runTimeMS milisecond$plural)</td></tr>";
+
+    if( $runTime > 0.5 ) {
+        ls_log( "This query took $runTimeMS miliseconds:  $query" );
+        }
     }
 
 

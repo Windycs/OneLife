@@ -228,6 +228,8 @@ typedef struct {
 
 static SimpleVector<HomePos> homePosStack;
 
+static SimpleVector<HomePos> oldHomePosStack;
+
 // used on reconnect to decide whether to delete old home positions
 static int lastPlayerID = -1;
 
@@ -513,9 +515,20 @@ char *getRelationName( SimpleVector<int> *ourLin,
     buffer.appendElementString( translate( "your" ) );
     buffer.appendElementString( " " );
 
-    for( int i=0; i<numGreats; i++ ) {
-        buffer.appendElementString( translate( "great" ) );
+
+    if( numGreats <= 4 ) {    
+        for( int i=0; i<numGreats; i++ ) {
+            buffer.appendElementString( translate( "great" ) );
+            }
         }
+    else {
+        char *greatCount = autoSprintf( "%dX %s", 
+                                        numGreats, translate( "great") );
+        buffer.appendElementString( greatCount );
+        delete [] greatCount;
+        }
+    
+    
     if( grand ) {
         buffer.appendElementString( translate( "grand" ) );
         }
@@ -1501,6 +1514,61 @@ void updateMoveSpeed( LiveObject *inObject ) {
 
     inObject->timeOfLastSpeedUpdate = game_getCurrentTime();
     }
+
+
+
+static void fixSingleStepPath( LiveObject *inObject ) {
+    
+    printf( "Fix for overtruncated, single-step path for player %d\n", 
+            inObject->id );
+    
+    // trimmed path too short
+    // needs to have at least
+    // a start and end pos
+    
+    // give it an artificial
+    // start pos
+    
+
+    doublePair nextWorld =
+        gridToDouble( 
+         inObject->pathToDest[0] );
+
+    
+    doublePair vectorAway;
+
+    if( ! equal( 
+            inObject->currentPos,
+            nextWorld ) ) {
+            
+        vectorAway = normalize(
+            sub( 
+                inObject->
+                currentPos,
+                nextWorld ) );
+        }
+    else {
+        vectorAway.x = 1;
+        vectorAway.y = 0;
+        }
+    
+    GridPos oldPos =
+        inObject->pathToDest[0];
+    
+    delete [] inObject->pathToDest;
+    inObject->pathLength = 2;
+    
+    inObject->pathToDest =
+        new GridPos[2];
+    inObject->pathToDest[0].x =
+        oldPos.x + vectorAway.x;
+    inObject->pathToDest[0].y =
+        oldPos.y + vectorAway.y;
+    
+    inObject->pathToDest[1] =
+        oldPos;
+    }
+
 
 
 // should match limit on server
@@ -3308,6 +3376,10 @@ void LivingLifePage::drawMapCell( int inMapI,
             // or permanent behind-player objects (e.g., roads) 
             // are never drawn flipped
             flip = false;
+            // remember that this tile is NOT flipped, so that it
+            // won't flip back strangely if it changes to something
+            // that doesn't have a noFlip status
+            mMapTileFlips[ inMapI ] = false;
             }
         
         char highlight = false;
@@ -10770,7 +10842,6 @@ void LivingLifePage::step() {
 
             // end it
             ourObject->pendingActionAnimationProgress = 0;
-            ourObject->pendingActionAnimationTotalProgress = 0;
             ourObject->pendingAction = false;
             
             playerActionPending = false;
@@ -11843,10 +11914,13 @@ void LivingLifePage::step() {
                     int closestX = 0;
                     int closestY = 0;
                     
-                    // only if marker starts on birth screen
+                    // only if marker starts on birth map chunk
                     
                     // use distance squared here, no need for sqrt
-                    double closestDist = 5 * 5;
+
+                    // rough estimate of radius of birth map chunk
+                    // this allows markers way off the screen, but so what?
+                    double closestDist = 16 * 16;
 
                     int mapCenterY = y + sizeY / 2;
                     int mapCenterX = x + sizeX / 2;
@@ -12815,6 +12889,9 @@ void LivingLifePage::step() {
                 o.currentEmot = NULL;
                 o.emotClearETATime = 0;
                 
+                o.killMode = false;
+                o.killWithID = -1;
+                
 
                 int forced = 0;
                 int done_moving = 0;
@@ -13182,7 +13259,7 @@ void LivingLifePage::step() {
                                 // PU destination matches our current path dest
                                 // no move truncation
                                 }
-                            else {
+                            else if( done_moving > 0 ) {
                                 // PU should be somewhere along our path
                                 // a truncated move
                                 
@@ -13214,19 +13291,32 @@ void LivingLifePage::step() {
                                         break;
                                         }
                                     }
+
+                                if( existing->pathLength == 1 ) {
+                                    fixSingleStepPath( existing );
+                                    }
                                 }
                             }
-
-                        // defer it until they're done moving
-                        printf( "Holding PU message for "
-                                "%d until later, "
-                                "%d other messages pending for them\n",
-                                existing->id,
-                                existing->pendingReceivedMessages.size() );
-                                
-                        existing->pendingReceivedMessages.push_back(
-                            autoSprintf( "PU\n%s\n#",
-                                         lines[i] ) );
+                        
+                        if( done_moving > 0  ||
+                            existing->pendingReceivedMessages.size() > 0 ) {
+                            
+                            // this PU happens after they are done moving
+                            // or it happens mid-move, but we already
+                            // have messages held, so it may be meant
+                            // to happen in the middle of their next move
+                            
+                            // defer it until they're done moving
+                            printf( "Holding PU message for "
+                                    "%d until later, "
+                                    "%d other messages pending for them\n",
+                                    existing->id,
+                                    existing->pendingReceivedMessages.size() );
+                            
+                            existing->pendingReceivedMessages.push_back(
+                                autoSprintf( "PU\n%s\n#",
+                                             lines[i] ) );
+                            }
                         }
                     else if( existing != NULL &&
                              existing->heldByAdultID != -1 &&
@@ -13333,6 +13423,14 @@ void LivingLifePage::step() {
                             existing->xd = o.xd;
                             existing->yd = o.yd;
                             existing->destTruncated = false;
+
+                            // clear an existing path, since they may no
+                            // longer be on it
+                            if( existing->pathToDest != NULL ) {
+                                delete [] existing->pathToDest;
+                                existing->pathToDest = NULL;
+                                }
+
                             }
                         existing->outOfRange = false;
 
@@ -13423,8 +13521,6 @@ void LivingLifePage::step() {
                                 existing->actionTargetY = actionTargetY;
                                 existing->pendingActionAnimationProgress = 
                                     0.025 * frameRateFactor;
-                                existing->pendingActionAnimationTotalProgress = 
-                                    existing->pendingActionAnimationProgress;
                                 }
 
                             if( heldOriginValid || 
@@ -13446,7 +13542,38 @@ void LivingLifePage::step() {
                                     }
                                 }
                             }
+                        else if( o.id == ourID &&
+                                 actionAttempt &&
+                                 ! justAte &&
+                                 existing->killMode &&
+                                 // they were still holding the same weapon
+                                 // before this update
+                                 existing->killWithID == oldHeld &&
+                                 // their weapon changed as a result of this
+                                 // update
+                                 existing->holdingID != oldHeld ) {
+                            
+                            // show kill "doing" animation and bounce
+                            
+                            playerActionTargetX = actionTargetX;
+                            playerActionTargetY = actionTargetY;
+                            
+                            addNewAnimPlayerOnly( existing, doing );
 
+                            if( existing->pendingActionAnimationProgress 
+                                == 0 ) {    
+                                existing->pendingActionAnimationProgress = 
+                                    0.025 * frameRateFactor;
+                                }
+                            
+                            if( facingOverride == 1 ) {
+                                existing->holdingFlip = false;
+                                }
+                            else if( facingOverride == -1 ) {
+                                existing->holdingFlip = true;
+                                }
+                            }
+                        
                         
                         char creationSoundPlayed = false;
                         char otherSoundPlayed = false;
@@ -13609,7 +13736,8 @@ void LivingLifePage::step() {
                                     }
                                 else {
                                     // don't interrupt walking
-                                    if( nearEndOfMovement( existing ) ) {
+                                    if( actionAttempt && 
+                                        nearEndOfMovement( existing ) ) {
                                         addNewAnimPlayerOnly( 
                                             existing, doing );
                                         }
@@ -14145,7 +14273,7 @@ void LivingLifePage::step() {
                         
                         char babyDropped = false;
                         
-                        if( done_moving && existing->heldByAdultID != -1 ) {
+                        if( done_moving > 0 && existing->heldByAdultID != -1 ) {
                             babyDropped = true;
                             }
                         
@@ -14164,6 +14292,13 @@ void LivingLifePage::step() {
                             existing->xd = o.xd;
                             existing->yd = o.yd;
                             existing->destTruncated = false;
+
+                            // clear an existing path, since they may no
+                            // longer be on it
+                            if( existing->pathToDest != NULL ) {
+                                delete [] existing->pathToDest;
+                                existing->pathToDest = NULL;
+                                }
 
                             if( existing->lastHeldByRawPosSet ) {    
                                 existing->heldByDropOffset =
@@ -14207,7 +14342,7 @@ void LivingLifePage::step() {
 
                             existing->heldByAdultID = -1;
                             }
-                        else if( done_moving && forced ) {
+                        else if( done_moving > 0 && forced ) {
                             
                             // don't ever force-update these for
                             // our locally-controlled object
@@ -14257,8 +14392,6 @@ void LivingLifePage::step() {
 
                             if( forced ) {
                                 existing->pendingActionAnimationProgress = 0;
-                                existing->pendingActionAnimationTotalProgress =
-                                    0;
                                 existing->pendingAction = false;
                                 
                                 playerActionPending = false;
@@ -14388,7 +14521,6 @@ void LivingLifePage::step() {
 
                         o.pendingAction = false;
                         o.pendingActionAnimationProgress = 0;
-                        o.pendingActionAnimationTotalProgress = 0;
                         
                         o.currentPos.x = o.xd;
                         o.currentPos.y = o.yd;
@@ -14775,9 +14907,11 @@ void LivingLifePage::step() {
                 ourID = ourObject->id;
 
                 if( ourID != lastPlayerID ) {
-                    // different ID than last time, delete home markers
-                    homePosStack.deleteAll();
+                    // different ID than last time, delete old home markers
+                    oldHomePosStack.deleteAll();
                     }
+                homePosStack.push_back_other( &oldHomePosStack );
+
                 lastPlayerID = ourID;
 
                 // we have no measurement yet
@@ -15104,6 +15238,14 @@ void LivingLifePage::step() {
                                         // off old path before or after 
                                         // where we are
                                         
+                                        printf( "    CUR PATH:  " );
+                                        printPath( oldPath.getElementArray(), 
+                                                   oldPathLength );
+                                        printf( "    WE AT:  %d (%d,%d)  \n",
+                                                oldCurrentPathIndex,
+                                                oldCurrentPathPos.x,
+                                                oldCurrentPathPos.y );
+
                                         int foundStartIndex = -1;
                                         
                                         for( int i=0; i<oldPathLength; i++ ) {
@@ -15184,52 +15326,7 @@ void LivingLifePage::step() {
                                                        existing->pathLength );
 
                                             if( existing->pathLength == 1 ) {
-                                                
-                                                // trimmed path too short
-                                                // needs to have at least
-                                                // a start and end pos
-                                                
-                                                // give it an artificial
-                                                // start pos
-                                                
-
-                                                doublePair nextWorld =
-                                                    gridToDouble( 
-                                                     existing->pathToDest[0] );
-
-                                                
-                                                doublePair vectorAway;
-
-                                                if( ! equal( 
-                                                        existing->currentPos,
-                                                        nextWorld ) ) {
-                                                        
-                                                    vectorAway = normalize(
-                                                        sub( 
-                                                            existing->
-                                                            currentPos,
-                                                            nextWorld ) );
-                                                    }
-                                                else {
-                                                    vectorAway.x = 1;
-                                                    vectorAway.y = 0;
-                                                    }
-                                                
-                                                GridPos oldPos =
-                                                    existing->pathToDest[0];
-                                                
-                                                delete [] existing->pathToDest;
-                                                existing->pathLength = 2;
-                                                
-                                                existing->pathToDest =
-                                                    new GridPos[2];
-                                                existing->pathToDest[0].x =
-                                                    oldPos.x + vectorAway.x;
-                                                existing->pathToDest[0].y =
-                                                    oldPos.y + vectorAway.y;
-                                                
-                                                existing->pathToDest[1] =
-                                                    oldPos;
+                                                fixSingleStepPath( existing );
                                                 }
                                             
                                             
@@ -15262,25 +15359,32 @@ void LivingLifePage::step() {
                                     
                                     printf( "Manually forced\n" );
                                     
-                                    // prev step
-                                    int b = 
-                                        (int)floor( 
-                                            fractionPassed * 
-                                            ( existing->pathLength - 1 ) );
-                                    // next step
-                                    int n =
-                                        (int)ceil( 
-                                            fractionPassed *
-                                            ( existing->pathLength - 1 ) );
+                                    // find closest spot along path
+                                    // to our current pos
+                                    double minDist = DBL_MAX;
                                     
-                                    if( n == b ) {
-                                        if( n < existing->pathLength - 1 ) {
-                                            n ++ ;
-                                            }
-                                        else {
-                                            b--;
+                                    // prev step
+                                    int b = -1;
+                                    
+                                    for( int testB=0; 
+                                         testB < existing->pathLength - 1; 
+                                         testB ++ ) {
+                                        
+                                        doublePair worldPos = gridToDouble( 
+                                            existing->pathToDest[testB] );
+                                        
+                                        double thisDist = 
+                                            distance( worldPos,
+                                                      existing->currentPos );
+                                        if( thisDist < minDist ) {
+                                            b = testB;
+                                            minDist = thisDist;
                                             }
                                         }
+                                    
+
+                                    // next step
+                                    int n = b + 1;
                                     
                                     existing->currentPathStep = b;
                                     
@@ -15331,7 +15435,14 @@ void LivingLifePage::step() {
                                     double timeAdjust =
                                         existing->moveTotalTime * fractionDiff;
                                     
-                                    existing->moveEtaTime += timeAdjust;
+                                    if( fractionDiff < 0 ) {
+                                        // only speed up...
+                                        // never slow down, because
+                                        // it's always okay if we show
+                                        // player arriving early
+
+                                        existing->moveEtaTime += timeAdjust;
+                                        }
                                     }
                                 
 
@@ -15344,8 +15455,6 @@ void LivingLifePage::step() {
                                 // (no longer possible, since truncated)
 
                                 existing->pendingActionAnimationProgress = 0;
-                                existing->pendingActionAnimationTotalProgress =
-                                    0;
                                 existing->pendingAction = false;
                                 
                                 playerActionPending = false;
@@ -16842,7 +16951,9 @@ void LivingLifePage::step() {
                 }
             else {
 
-                if( o->id == ourID && mouseDown && shouldMoveCamera ) {
+                if( o->id == ourID && mouseDown && shouldMoveCamera &&
+                    o->pathLength > 2 ) {
+                    
                     float worldMouseX, worldMouseY;
                     
                     screenToWorld( lastScreenMouseX,
@@ -16909,11 +17020,17 @@ void LivingLifePage::step() {
                                 o->waypointY = lrint( worldMouseY / CELL_D );
 
                                 pointerDown( fakeClick.x, fakeClick.y );
+
+                                endPos.x = (double)( fakeClick.x );
+                                endPos.y = (double)( fakeClick.y );
                                
                                 o->useWaypoint = false;
                                 }
                             else {
                                 pointerDown( worldMouseX, worldMouseY );
+
+                                endPos.x = (double)( worldMouseX );
+                                endPos.y = (double)( worldMouseY );
                                 }
                             }
                         }
@@ -17067,7 +17184,8 @@ void LivingLifePage::step() {
                             }
                         }
 
-                    printf( "Reached dest %f seconds early\n",
+                    printf( "Reached dest (%.0f,%.0f) %f seconds early\n",
+                            endPos.x, endPos.y,
                             o->moveEtaTime - game_getCurrentTime() );
                     }
                 else {
@@ -17110,7 +17228,6 @@ void LivingLifePage::step() {
             ( o->pendingAction || o->pendingActionAnimationProgress != 0 ) ) {
             
             o->pendingActionAnimationProgress += progressInc;
-            o->pendingActionAnimationTotalProgress += progressInc;
             
             if( o->pendingActionAnimationProgress > 1 ) {
                 if( o->pendingAction ) {
@@ -17121,7 +17238,6 @@ void LivingLifePage::step() {
                     // no longer pending, finish last cycle by snapping
                     // back to 0
                     o->pendingActionAnimationProgress = 0;
-                    o->pendingActionAnimationTotalProgress = 0;
                     o->actionTargetTweakX = 0;
                     o->actionTargetTweakY = 0;
                     }
@@ -17130,13 +17246,11 @@ void LivingLifePage::step() {
         else if( o->id != ourID && o->pendingActionAnimationProgress != 0 ) {
             
             o->pendingActionAnimationProgress += progressInc;
-            o->pendingActionAnimationTotalProgress += progressInc;
             
             if( o->pendingActionAnimationProgress > 1 ) {
                 // no longer pending, finish last cycle by snapping
                 // back to 0
                 o->pendingActionAnimationProgress = 0;
-                o->pendingActionAnimationTotalProgress = 0;
                 o->actionTargetTweakX = 0;
                 o->actionTargetTweakY = 0;
                 }
@@ -17192,9 +17306,7 @@ void LivingLifePage::step() {
             // matter how fast the server responds
             ourLiveObject->pendingActionAnimationProgress = 
                 0.025 * frameRateFactor;
-            ourLiveObject->pendingActionAnimationTotalProgress =
-                ourLiveObject->pendingActionAnimationProgress;
-
+            
             ourLiveObject->pendingActionAnimationStartTime = 
                 currentTime;
             
@@ -17552,6 +17664,11 @@ void LivingLifePage::makeActive( char inFresh ) {
     if( !inFresh ) {
         return;
         }
+
+    oldHomePosStack.deleteAll();
+    
+    oldHomePosStack.push_back_other( &homePosStack );
+    
 
     takingPhoto = false;
     photoSequenceNumber = -1;
@@ -18667,6 +18784,103 @@ void LivingLifePage::pointerDown( float inX, float inY ) {
     
 
     checkForPointerHit( &p, inX, inY );
+
+
+
+    // new semantics
+    // as soon as we trigger a kill attempt, we go into kill mode
+    // by sending server a KILL message right away
+    char killMode = false;
+ 
+
+    // don't allow weapon-drop on kill-click unless there's really
+    // no one around
+    if( ! mouseAlreadyDown &&
+        modClick && ourLiveObject->holdingID > 0 &&
+        getObject( ourLiveObject->holdingID )->deadlyDistance > 0 &&
+        isShiftKeyDown() &&
+        ! p.hitOtherPerson ) {
+        
+        // everything good to go for a kill-click, but they missed
+        // hitting someone (and maybe they clicked on an object instead)
+
+        // find closest person for them to hit
+        
+        doublePair clickPos = { inX, inY };
+        
+        
+        int closePersonID = -1;
+        double closeDistance = DBL_MAX;
+        
+        for( int i=gameObjects.size()-1; i>=0; i-- ) {
+        
+            LiveObject *o = gameObjects.getElement( i );
+
+            if( o->id == ourID ) {
+                // don't consider ourself as a kill target
+                continue;
+                }
+            
+            if( o->outOfRange ) {
+                // out of range, but this was their last known position
+                // don't draw now
+                continue;
+                }
+            
+            if( o->heldByAdultID != -1 ) {
+                // held by someone else, can't click on them
+                continue;
+                }
+            
+            if( o->heldByDropOffset.x != 0 ||
+                o->heldByDropOffset.y != 0 ) {
+                // recently dropped baby, skip
+                continue;
+                }
+                
+                
+            double oX = o->xd;
+            double oY = o->yd;
+                
+            if( o->currentSpeed != 0 && o->pathToDest != NULL ) {
+                oX = o->currentPos.x;
+                oY = o->currentPos.y;
+                }
+
+            oY *= CELL_D;
+            oX *= CELL_D;
+            
+
+            // center of body up from feet position in tile
+            oY += CELL_D / 2;
+            
+            doublePair oPos = { oX, oY };
+            
+
+            double thisDistance = distance( clickPos, oPos );
+            
+            if( thisDistance < closeDistance ) {
+                closeDistance = thisDistance;
+                closePersonID = o->id;
+                }
+            }
+
+        if( closePersonID != -1 && closeDistance < 4 * CELL_D ) {
+            // somewhat close to clicking on someone
+            p.hitOtherPerson = true;
+            p.hitOtherPersonID = closePersonID;
+            p.hitAnObject = false;
+            p.hit = true;
+            killMode = true;
+            }
+        
+        }
+
+
+
+
+
+
     
     mCurMouseOverPerson = p.hitOtherPerson || p.hitSelf;
 
@@ -18773,7 +18987,8 @@ void LivingLifePage::pointerDown( float inX, float inY ) {
             clickDestX, clickDestY, 
             mapX, mapY,
             ourLiveObject->xd, ourLiveObject->yd );
-    if( mapY >= 0 && mapY < mMapD &&
+    if( ! killMode && 
+        mapY >= 0 && mapY < mMapD &&
         mapX >= 0 && mapX < mMapD ) {
         
         destID = mMap[ mapY * mMapD + mapX ];
@@ -19028,108 +19243,68 @@ void LivingLifePage::pointerDown( float inX, float inY ) {
         }
     
 
-    // true if we're too far away to kill BUT we should execute
-    // kill once we get to destination
 
-    // if we're close enough to kill, we'll kill from where we're standing
-    // and return
-    char killLater = false;
-    int killLaterID = -1;
+   
+    
     
 
+
     if( destID == 0 &&
+        p.hitOtherPerson &&
         modClick && ourLiveObject->holdingID > 0 &&
-        getObject( ourLiveObject->holdingID )->deadlyDistance > 0 ) {
+        getObject( ourLiveObject->holdingID )->deadlyDistance > 0 &&
+        isShiftKeyDown() ) {
         
         // special case
 
         // check for possible kill attempt at a distance
 
-        // if it fails (target too far away or no person near),
-        // then we resort to standard drop code below
-
-
-        double d = sqrt( ( clickDestX - ourLiveObject->xd ) * 
-                         ( clickDestX - ourLiveObject->xd )
-                         +
-                         ( clickDestY - ourLiveObject->yd ) * 
-                         ( clickDestY - ourLiveObject->yd ) );
-
-        doublePair targetPos = { (double)clickDestX, (double)clickDestY };
+        LiveObject *o = getLiveObject( p.hitOtherPersonID );
         
-
-
-        for( int i=0; i<gameObjects.size(); i++ ) {
-        
-            LiveObject *o = gameObjects.getElement( i );
-            
-            if( o->id != ourID &&
-                o->heldByAdultID == -1 ) {
+        if( o->id != ourID &&            
+            o->heldByAdultID == -1 ) {
                 
-                // can't kill by clicking on ghost-location of held baby
-
-                if( distance( targetPos, o->currentPos ) < 1 ) {
-                    // clicked on someone
+            // can't kill by clicking on ghost-location of held baby
+            
+            // clicked on someone
                     
-                    if( getObject( ourLiveObject->holdingID )->deadlyDistance 
-                        >= d ) {
-                        // close enough to use deadly object right now
-
-                        
-                        if( nextActionMessageToSend != NULL ) {
-                            delete [] nextActionMessageToSend;
-                            nextActionMessageToSend = NULL;
-                            }
-                        
-                        if( p.hitOtherPerson ) {
-                            nextActionMessageToSend = 
-                                autoSprintf( "KILL %d %d %d#",
-                                             sendX( clickDestX ), 
-                                             sendY( clickDestY ),
-                                             p.hitOtherPersonID );
-                            printf( "KILL with direct-click target player "
-                                    "id=%d\n", p.hitOtherPersonID );
-                            }
-                        else {
-                            nextActionMessageToSend = 
-                                autoSprintf( "KILL %d %d#",
-                                             sendX( clickDestX ), 
-                                             sendY( clickDestY ) );
-                            printf( "KILL with target "
-                                    "player on closest tile, id=%d\n", o->id );
-                            }
-                        
-                        
-                        playerActionTargetX = clickDestX;
-                        playerActionTargetY = clickDestY;
-                        
-                        playerActionTargetNotAdjacent = true;
-                        
-                        
-
-                        return;
-                        }
-                    else {
-                        // too far away, but try to kill later,
-                        // once we walk there, using standard path-to-adjacent
-                        // code below
-                        killLater = true;
-                        
-                        if( p.hitOtherPerson ) {
-                            killLaterID = p.hitOtherPersonID;
-                            }
-                        
-                        break;
-                        }
-                    }
+            // new semantics:
+            // send KILL to server right away to
+            // tell server of our intentions
+            // (whether or not we are close enough)
+                
+            // then walk there
+                
+            if( nextActionMessageToSend != NULL ) {
+                delete [] nextActionMessageToSend;
+                nextActionMessageToSend = NULL;
                 }
+                        
+                        
+            char *killMessage = 
+                autoSprintf( "KILL %d %d %d#",
+                             sendX( clickDestX ), 
+                             sendY( clickDestY ),
+                             p.hitOtherPersonID );
+            printf( "KILL with direct-click target player "
+                    "id=%d\n", p.hitOtherPersonID );
+                    
+            sendToServerSocket( killMessage );
+
+            // try to walk near victim right away
+            killMode = true;
+                    
+            ourLiveObject->killMode = true;
+            ourLiveObject->killWithID = ourLiveObject->holdingID;
+
+            // ignore mod-click from here on out, to avoid
+            // force-dropping weapon
+            modClick = false;
             }
-    
         }
     
 
-    if( ! killLater &&
-        destID != 0 &&
+    if( destID != 0 &&
         ! modClick &&
         ourLiveObject->holdingID > 0 &&
         getObject( ourLiveObject->holdingID )->useDistance > 1 &&
@@ -19217,8 +19392,7 @@ void LivingLifePage::pointerDown( float inX, float inY ) {
     // and return
     char useOnBabyLater = false;
     
-    if( !killLater &&
-        p.hitOtherPerson &&
+    if( p.hitOtherPerson &&
         ! modClick && 
         destID == 0 &&
         canClickOnOtherForNonKill ) {
@@ -19323,7 +19497,8 @@ void LivingLifePage::pointerDown( float inX, float inY ) {
 
     
 
-    if( destID == 0 && !modClick && !tryingToPickUpBaby && !useOnBabyLater && 
+    if( !killMode && 
+        destID == 0 && !modClick && !tryingToPickUpBaby && !useOnBabyLater && 
         ! ( clickDestX == ourLiveObject->xd && 
             clickDestY == ourLiveObject->yd ) ) {
         // a move to an empty spot where we're not already standing
@@ -19332,6 +19507,7 @@ void LivingLifePage::pointerDown( float inX, float inY ) {
         mustMove = true;
         }
     else if( ( modClick && ourLiveObject->holdingID != 0 )
+             || killMode
              || tryingToPickUpBaby
              || useOnBabyLater
              || destID != 0
@@ -19491,7 +19667,7 @@ void LivingLifePage::pointerDown( float inX, float inY ) {
             }
         
 
-        if( canExecute ) {
+        if( canExecute && ! killMode ) {
             
             const char *action = "";
             char *extra = stringDuplicate( "" );
@@ -19519,61 +19695,46 @@ void LivingLifePage::pointerDown( float inX, float inY ) {
                 nextActionDropping = true;
                 send = true;
 
-                // special case:  we're too far away to kill someone
-                // but we've right clicked on them from a distance
-                // walk up and execute KILL once we get there.
-                
-                if( killLater ) {
-                    action = "KILL";
+                // check for other special case
+                // a use-on-ground transition or use-on-floor transition
 
-                    if( killLaterID != -1 ) {
-                        delete [] extra;
-                        extra = autoSprintf( " %d", killLaterID );
+                if( ourLiveObject->holdingID > 0 ) {
+                        
+                    ObjectRecord *held = 
+                        getObject( ourLiveObject->holdingID );
+                        
+                    char foundAlt = false;
+                        
+                    if( held->foodValue == 0 ) {
+                            
+                        TransRecord *r = 
+                            getTrans( ourLiveObject->holdingID,
+                                      -1 );
+                            
+                        if( r != NULL &&
+                            r->newTarget != 0 ) {
+                                
+                            // a use-on-ground transition exists!
+                                
+                            // override the drop action
+                            action = "USE";
+                            foundAlt = true;
+                            }
                         }
-                    }
-                else {
-                    // check for other special case
-                    // a use-on-ground transition or use-on-floor transition
 
-                    if( ourLiveObject->holdingID > 0 ) {
-                        
-                        ObjectRecord *held = 
-                            getObject( ourLiveObject->holdingID );
-                        
-                        char foundAlt = false;
-                        
-                        if( held->foodValue == 0 ) {
-                            
-                            TransRecord *r = 
-                                getTrans( ourLiveObject->holdingID,
-                                          -1 );
-                            
-                            if( r != NULL &&
-                                r->newTarget != 0 ) {
+                    if( !foundAlt && floorDestID > 0 ) {
+                        // check if use on floor exists
+                        TransRecord *r = 
+                            getTrans( ourLiveObject->holdingID, 
+                                      floorDestID );
                                 
-                                // a use-on-ground transition exists!
+                        if( r != NULL ) {
+                            // a use-on-floor transition exists!
                                 
-                                // override the drop action
-                                action = "USE";
-                                foundAlt = true;
-                                }
+                            // override the drop action
+                            action = "USE";
+                                
                             }
-
-                        if( !foundAlt && floorDestID > 0 ) {
-                            // check if use on floor exists
-                            TransRecord *r = 
-                                getTrans( ourLiveObject->holdingID, 
-                                          floorDestID );
-                                
-                            if( r != NULL ) {
-                                // a use-on-floor transition exists!
-                                
-                                // override the drop action
-                                action = "USE";
-                                
-                                }
-                            }
-
                         }
                     }
                 }

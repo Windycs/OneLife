@@ -194,6 +194,23 @@ static int maxEveLocationUsage = 3;
 static double eveAngle = 2 * M_PI;
 
 
+static int evePrimaryLocSpacing = 0;
+static int evePrimaryLocObjectID = -1;
+static SimpleVector<int> eveSecondaryLocObjectIDs;
+
+static GridPos lastEvePrimaryLocation = {0,0};
+
+static SimpleVector<GridPos> recentlyUsedPrimaryEvePositions;
+static SimpleVector<int> recentlyUsedPrimaryEvePositionPlayerIDs;
+// when they were place, so they can time out
+static SimpleVector<double> recentlyUsedPrimaryEvePositionTimes;
+// one hour
+static double recentlyUsedPrimaryEvePositionTimeout = 3600;
+
+static int eveHomeMarkerObjectID = -1;
+
+
+
 
 // what human-placed stuff, together, counts as a camp
 static int campRadius = 20;
@@ -993,7 +1010,7 @@ static void mapCacheInsert( int inX, int inY, int inID ) {
 static int getBaseMapCallCount = 0;
 
 
-static int getBaseMap( int inX, int inY ) {
+static int getBaseMap( int inX, int inY, char *outGridPlacement = NULL ) {
     
     if( inX > xLimit || inX < -xLimit ||
         inY > yLimit || inY < -yLimit ) {
@@ -1009,6 +1026,11 @@ static int getBaseMap( int inX, int inY ) {
     
     getBaseMapCallCount ++;
 
+
+    if( outGridPlacement != NULL ) {
+        *outGridPlacement = false;
+        }
+    
 
     // see if any of our grids apply
     setXYRandomSeed( 9753 );
@@ -1051,6 +1073,10 @@ static int getBaseMap( int inX, int inY ) {
 
             if( gp->permittedBiomes.getElementIndex( pickedBiome ) != -1 ) {
                 mapCacheInsert( inX, inY, gp->id );
+
+                if( outGridPlacement != NULL ) {
+                    *outGridPlacement = true;
+                    }
                 return gp->id;
                 }
             }    
@@ -2455,6 +2481,11 @@ char initMap() {
     speechPipesOut = new SimpleVector<GridPos>[ numSpeechPipes ];
     
 
+    eveSecondaryLocObjectIDs.deleteAll();
+    recentlyUsedPrimaryEvePositionTimes.deleteAll();
+    recentlyUsedPrimaryEvePositions.deleteAll();
+    recentlyUsedPrimaryEvePositionPlayerIDs.deleteAll();
+    
 
     initDBCaches();
     initBiomeCache();
@@ -3107,6 +3138,15 @@ char initMap() {
     for( int i=0; i<numObjects; i++ ) {
         ObjectRecord *o = allObjects[i];
 
+        if( strstr( o->description, "eveSecondaryLoc" ) != NULL ) {
+            eveSecondaryLocObjectIDs.push_back( o->id );
+            }
+        if( strstr( o->description, "eveHomeMarker" ) != NULL ) {
+            eveHomeMarkerObjectID = o->id;
+            }
+        
+
+
         float p = o->mapChance;
         if( p > 0 ) {
             int id = o->id;
@@ -3122,6 +3162,11 @@ char initMap() {
                 int spacing = 10;
                 sscanf( gridPlacementLoc, "gridPlacement%d", &spacing );
                 
+                if( strstr( o->description, "evePrimaryLoc" ) != NULL ) {
+                    evePrimaryLocObjectID = id;
+                    evePrimaryLocSpacing = spacing;
+                    }
+
                 SimpleVector<int> permittedBiomes;
                 for( int b=0; b<o->numBiomes; b++ ) {
                     permittedBiomes.push_back( 
@@ -5094,76 +5139,108 @@ void checkDecayContained( int inX, int inY, int inSubCont ) {
     }
 
 
-int getMapObjectRaw( int inX, int inY ) {
-    int result = dbGet( inX, inY, 0 );
-    
-    if( result == -1 ) {
-        // nothing in map
-        result = getBaseMap( inX, inY );
-        
-        if( result > 0 ) {
-            ObjectRecord *o = getObject( result );
-            
-            if( o->wide ) {
-                // make sure there's not possibly another wide object too close
-                int maxR = getMaxWideRadius();
-                
-                for( int dx = -( o->leftBlockingRadius + maxR );
-                     dx <= ( o->rightBlockingRadius + maxR ); dx++ ) {
-                    
-                    if( dx != 0 ) {
-                        int nID = getBaseMap( inX + dx, inY );
-                        
-                        if( nID > 0 ) {
-                            ObjectRecord *nO = getObject( nID );
-                            
-                            if( nO->wide ) {
-                                
-                                int minDist;
-                                int dist;
-                                
-                                if( dx < 0 ) {
-                                    minDist = nO->rightBlockingRadius +
-                                        o->leftBlockingRadius;
-                                    dist = -dx;
-                                    }
-                                else {
-                                    minDist = nO->leftBlockingRadius +
-                                        o->rightBlockingRadius;
-                                    dist = dx;
-                                    }
 
-                                if( dist <= minDist ) {
-                                    // collision
-                                    // don't allow this wide object here
-                                    return 0;
-                                    }
+
+int getTweakedBaseMap( int inX, int inY ) {
+    
+    // nothing in map
+    char wasGridPlacement = false;
+        
+    int result = getBaseMap( inX, inY, &wasGridPlacement );
+
+    if( result > 0 ) {
+        ObjectRecord *o = getObject( result );
+            
+        if( o->wide ) {
+            // make sure there's not possibly another wide object too close
+            int maxR = getMaxWideRadius();
+                
+            for( int dx = -( o->leftBlockingRadius + maxR );
+                 dx <= ( o->rightBlockingRadius + maxR ); dx++ ) {
+                    
+                if( dx != 0 ) {
+                    int nID = getBaseMap( inX + dx, inY );
+                        
+                    if( nID > 0 ) {
+                        ObjectRecord *nO = getObject( nID );
+                            
+                        if( nO->wide ) {
+                                
+                            int minDist;
+                            int dist;
+                                
+                            if( dx < 0 ) {
+                                minDist = nO->rightBlockingRadius +
+                                    o->leftBlockingRadius;
+                                dist = -dx;
+                                }
+                            else {
+                                minDist = nO->leftBlockingRadius +
+                                    o->rightBlockingRadius;
+                                dist = dx;
+                                }
+
+                            if( dist <= minDist ) {
+                                // collision
+                                // don't allow this wide object here
+                                return 0;
                                 }
                             }
                         }
                     }
                 }
-            else if( getObjectHeight( result ) < CELL_D ) {
-                // a short object should be here
-                // make sure there's not a tall object below already
-
-                
-                // south
-                int sID = getBaseMap( inX, inY - 1 );
-                        
-                if( sID > 0 && getObjectHeight( sID ) >= 1 * CELL_D ) {
-                    return 0;
-                    }
-                
-                int s2ID = getBaseMap( inX, inY - 2 );
-                        
-                if( s2ID > 0 && getObjectHeight( s2ID ) >= 2 * CELL_D ) {
-                    return 0;
-                    }                
-                }
-            
             }
-        
+        else if( !wasGridPlacement && getObjectHeight( result ) < CELL_D ) {
+            // a short object should be here
+            // and it wasn't forced by a grid placement
+
+            // make sure there's not any semi-short objects below already
+
+            // this avoids vertical stacking of short objects
+            // and ensures that the map is sparse with short object
+            // clusters, even in very dense map areas
+            // (we don't want the floor tiled with berry bushes)
+
+            // this used to be an unintentional bug, but it was in place
+            // for a year, and we got used to it.
+
+            // when the bug was fixed, the map became way too dense
+            // in short-object areas
+                
+            // actually, fully replicate the bug for now
+            // only block short objects with objects to the south
+            // that extend above the tile midline
+
+            // So we can have clusters of very short objects, like stones
+            // but not less-short ones like berry bushes, rabbit holes, etc.
+
+            // use the old buggy "2 pixels" and "3 pixels" above the
+            // midline measure just to keep the map the same
+
+            // south
+            int sID = getBaseMap( inX, inY - 1 );
+                        
+            if( sID > 0 && getObjectHeight( sID ) >= 2 ) {
+                return 0;
+                }
+                
+            int s2ID = getBaseMap( inX, inY - 2 );
+                        
+            if( s2ID > 0 && getObjectHeight( s2ID ) >= 3 ) {
+                return 0;
+                }                
+            }            
+        }
+    return result;
+    }
+
+
+
+int getMapObjectRaw( int inX, int inY ) {
+    int result = dbGet( inX, inY, 0 );
+    
+    if( result == -1 ) {
+        result = getTweakedBaseMap( inX, inY );
         }
     
     return result;
@@ -6827,7 +6904,12 @@ doublePair computeRecentCampAve( int *outNumPosFound ) {
 
 
 
-void getEvePosition( const char *inEmail, int *outX, int *outY, 
+extern char doesEveLineExist( int inEveID );
+
+
+
+void getEvePosition( const char *inEmail, int inID, int *outX, int *outY, 
+                     SimpleVector<GridPos> *inOtherPeoplePos,
                      char inAllowRespawn ) {
 
     int currentEveRadius = eveRadius;
@@ -6855,15 +6937,219 @@ void getEvePosition( const char *inEmail, int *outX, int *outY,
         // player has never been an Eve that survived to old age before
         // or such repawning forbidden by caller
 
+        maxEveLocationUsage = 
+            SettingsManager::getIntSetting( "maxEveStartupLocationUsage", 10 );
+
+        
+        // first try new grid placement method
+        if( eveLocationUsage >= maxEveLocationUsage
+            && evePrimaryLocObjectID > 0 ) {
+            
+            GridPos centerP = lastEvePrimaryLocation;
+            
+            if( inOtherPeoplePos->size() > 0 ) {
+                
+                centerP = inOtherPeoplePos->getElementDirect( 
+                    randSource.getRandomBoundedInt(
+                        0, inOtherPeoplePos->size() - 1 ) );
+                
+                // round to nearest whole spacing multiple
+                centerP.x /= evePrimaryLocSpacing;
+                centerP.y /= evePrimaryLocSpacing;
+                
+                centerP.x *= evePrimaryLocSpacing;
+                centerP.y *= evePrimaryLocSpacing;
+                }
+            
+
+            GridPos tryP = centerP;
+            char found = false;
+            GridPos foundP = tryP;
+            
+            double curTime = Time::getCurrentTime();
+            
+            int r;
+            
+            int maxSearchRadius = 10;
+
+
+            // first, clean any that have timed out
+            // or gone extinct
+            for( int p=0; p<recentlyUsedPrimaryEvePositions.size();
+                 p++ ) {
+
+                char reusePos = false;
+                
+                if( curTime -
+                    recentlyUsedPrimaryEvePositionTimes.
+                    getElementDirect( p )
+                    > recentlyUsedPrimaryEvePositionTimeout ) {
+                    // timed out
+                    reusePos = true;
+                    }
+                else if( ! doesEveLineExist( 
+                             recentlyUsedPrimaryEvePositionPlayerIDs.
+                             getElementDirect( p ) ) ) {
+                    // eve line extinct
+                    reusePos = true;
+                    }
+
+                if( reusePos ) {
+                    recentlyUsedPrimaryEvePositions.
+                        deleteElement( p );
+                    recentlyUsedPrimaryEvePositionTimes.
+                        deleteElement( p );
+                    recentlyUsedPrimaryEvePositionPlayerIDs.
+                        deleteElement( p );
+                    p--;
+                    }
+                }
+
+
+            for( r=1; r<maxSearchRadius; r++ ) {
+                
+                for( int y=-r; y<=r; y++ ) {
+                    for( int x=-r; x<=r; x++ ) {
+                        tryP = centerP;
+                        
+                        tryP.x += x * evePrimaryLocSpacing;
+                        tryP.y += y * evePrimaryLocSpacing;
+                        
+                        char existsAlready = false;
+
+                        for( int p=0; p<recentlyUsedPrimaryEvePositions.size();
+                             p++ ) {
+
+                            GridPos pos =
+                                recentlyUsedPrimaryEvePositions.
+                                getElementDirect( p );
+                            
+                            if( equal( pos, tryP ) ) {
+                                existsAlready = true;
+                                break;
+                                }
+                            }
+                        
+                        if( existsAlready ) {
+                            continue;
+                            }
+                        else {
+                            }
+                        
+                                     
+                        int mapID = getMapObject( tryP.x, tryP.y );
+
+                        if( mapID == evePrimaryLocObjectID ) {
+                            printf( "Found primary Eve object at %d,%d\n",
+                                    tryP.x, tryP.y );
+                            found = true;
+                            foundP = tryP;
+                            }
+                        else if( eveSecondaryLocObjectIDs.getElementIndex( 
+                                     mapID ) != -1 ) {
+                            // a secondary ID, allowed
+                            printf( "Found secondary Eve object at %d,%d\n",
+                                    tryP.x, tryP.y );
+                            found = true;
+                            foundP = tryP;
+                            }
+                        }
+                
+                    if( found ) break;
+                    }
+                if( found ) break;
+                }
+
+            if( found ) {
+
+                if( r >= maxSearchRadius / 2 ) {
+                    // exhausted central window around last eve center
+                    // save this as the new eve center
+                    // next time, we'll search a window around that
+
+                    AppLog::infoF( "Eve pos %d,%d not in center of "
+                                   "grid window, recentering window for "
+                                   "next time", foundP.x, foundP.y );
+
+                    lastEvePrimaryLocation = foundP;
+                    }
+
+                AppLog::infoF( "Sticking Eve at unused primary grid pos "
+                               "of %d,%d\n",
+                               foundP.x, foundP.y );
+                
+                recentlyUsedPrimaryEvePositions.push_back( foundP );
+                recentlyUsedPrimaryEvePositionTimes.push_back( curTime );
+                recentlyUsedPrimaryEvePositionPlayerIDs.push_back( inID );
+                
+                // stick Eve directly to south
+                *outX = foundP.x;
+                *outY = foundP.y - 1;
+                
+                if( eveHomeMarkerObjectID > 0 ) {
+                    // stick home marker there
+                    setMapObject( *outX, *outY, eveHomeMarkerObjectID );
+                    }
+                else {
+                    // make it empty
+                    setMapObject( *outX, *outY, 0 );
+                    }
+                
+                // clear a few more objects to the south, to make
+                // sure Eve's spring doesn't spawn behind a tree
+                setMapObject( *outX, *outY - 1, 0 );
+                setMapObject( *outX, *outY - 2, 0 );
+                setMapObject( *outX, *outY - 3, 0 );
+                
+                
+                // finally, prevent Eve entrapment by sticking
+                // her at a random location around the spring
+
+                doublePair v = { 14, 0 };
+                v = rotate( v, randSource.getRandomBoundedInt( 0, 2 * M_PI ) );
+                
+                *outX += v.x;
+                *outY += v.y;
+                
+                return;
+                }
+            else {
+                AppLog::info( "Unable to find location for Eve "
+                              "on primary grid." );
+                }
+            }
+        
+
         // New method:
         GridPos eveLocToUse = eveLocation;
         
-        maxEveLocationUsage = 
-            SettingsManager::getIntSetting( "maxEveStartupLocationUsage", 10 );
 
         if( eveLocationUsage < maxEveLocationUsage ) {
             eveLocationUsage++;
             // keep using same location
+
+            printf( "Reusing same eve start-up location "
+                    "of %d,%d for %dth time\n",
+                    eveLocation.x, eveLocation.y, eveLocationUsage );
+            
+
+            // remember it for when we exhaust it
+            if( evePrimaryLocObjectID > 0 &&
+                evePrimaryLocSpacing > 0 ) {
+
+                lastEvePrimaryLocation = eveLocation;
+                // round to nearest whole spacing multiple
+                lastEvePrimaryLocation.x /= evePrimaryLocSpacing;
+                lastEvePrimaryLocation.y /= evePrimaryLocSpacing;
+                
+                lastEvePrimaryLocation.x *= evePrimaryLocSpacing;
+                lastEvePrimaryLocation.y *= evePrimaryLocSpacing;
+            
+                printf( "Saving eve start-up location close grid pos "
+                        "of %d,%d for later\n",
+                        lastEvePrimaryLocation.x, lastEvePrimaryLocation.y );
+                }
+
             }
         else {
             // post-startup eve location has been used too many times
@@ -7335,8 +7621,11 @@ GridPos getNextFlightLandingPos( int inCurrentX, int inCurrentY,
     // crash them at next Eve location
     
     int eveX, eveY;
+
+    SimpleVector<GridPos> otherPeoplePos;
     
-    getEvePosition( "dummyPlaneCrashEmail@test.com", &eveX, &eveY, false );
+    getEvePosition( "dummyPlaneCrashEmail@test.com", 0, &eveX, &eveY, 
+                    &otherPeoplePos, false );
     
     GridPos returnVal = { eveX, eveY };
     
@@ -7378,3 +7667,148 @@ void setGravePlayerID( int inX, int inY, int inPlayerID ) {
     DB_put( &graveDB, key, value );
     }
 
+
+
+
+
+
+static char tileCullingIteratorSet = false;
+static DB_Iterator tileCullingIterator;
+
+static char floorCullingIteratorSet = false;
+static DB_Iterator floorCullingIterator;
+
+static double lastSettingsLoadTime = 0;
+static double settingsLoadInterval = 5 * 60;
+
+static int numTilesExaminedPerCullStep = 10;
+static int longTermCullingSeconds = 3600 * 12;
+
+static int minActivePlayersForLongTermCulling = 15;
+
+static SimpleVector<int> noCullItemList;
+
+
+void stepMapLongTermCulling( int inNumCurrentPlayers ) {
+
+    double curTime = Time::getCurrentTime();
+    
+    if( curTime - lastSettingsLoadTime > settingsLoadInterval ) {
+        
+        lastSettingsLoadTime = curTime;
+        
+        numTilesExaminedPerCullStep = 
+            SettingsManager::getIntSetting( 
+                "numTilesExaminedPerCullStep", 10 );
+        longTermCullingSeconds = 
+            SettingsManager::getIntSetting( 
+                "longTermNoLookCullSeconds", 3600 * 12 );
+        minActivePlayersForLongTermCulling = 
+            SettingsManager::getIntSetting( 
+                "minActivePlayersForLongTermCulling", 15 );
+        
+        SimpleVector<int> *list = 
+            SettingsManager::getIntSettingMulti( "noCullItemList" );
+        
+        noCullItemList.deleteAll();
+        noCullItemList.push_back_other( list );
+        delete list;
+        }
+
+
+    if( minActivePlayersForLongTermCulling > inNumCurrentPlayers ) {
+        return;
+        }
+
+    
+    if( !tileCullingIteratorSet ) {
+        DB_Iterator_init( &db, &tileCullingIterator );
+        tileCullingIteratorSet = true;
+        }
+
+    unsigned char tileKey[16];
+    unsigned char floorKey[8];
+    unsigned char value[4];
+
+
+    for( int i=0; i<numTilesExaminedPerCullStep; i++ ) {        
+        int result = 
+            DB_Iterator_next( &tileCullingIterator, tileKey, value );
+
+        if( result <= 0 ) {
+            // restart the iterator back at the beginning
+            DB_Iterator_init( &db, &tileCullingIterator );
+            continue;
+            }
+
+        
+        int tileID = valueToInt( value );
+        
+        if( tileID > 0 ) {
+            // next value
+
+            int s = valueToInt( &( tileKey[8] ) );
+            int b = valueToInt( &( tileKey[12] ) );
+       
+            if( s == 0 && b == 0 ) {
+                // main object
+                int x = valueToInt( tileKey );
+                int y = valueToInt( &( tileKey[4] ) );
+                
+                timeSec_t lastLookTime = dbLookTimeGet( x, y );
+
+                if( curTime - lastLookTime > longTermCullingSeconds ) {
+                    // stale
+                    
+                    if( noCullItemList.getElementIndex( tileID ) == -1 ) {
+                        // not on our no-cull list
+                        clearAllContained( x, y );
+
+                        // put proc-genned map value in there
+                        setMapObject( x, y, getTweakedBaseMap( x, y ) );
+                        }
+                    }
+                }
+            }
+        }
+    
+    
+
+    if( !floorCullingIteratorSet ) {
+        DB_Iterator_init( &floorDB, &floorCullingIterator );
+        floorCullingIteratorSet = true;
+        }
+    
+
+    for( int i=0; i<numTilesExaminedPerCullStep; i++ ) {        
+        int result = 
+            DB_Iterator_next( &floorCullingIterator, floorKey, value );
+
+        if( result <= 0 ) {
+            // restart the iterator back at the beginning
+            DB_Iterator_init( &floorDB, &floorCullingIterator );
+            continue;
+            }
+        
+        int floorID = valueToInt( value );
+        
+        if( floorID > 0 ) {
+            // next value
+            
+            int x = valueToInt( floorKey );
+            int y = valueToInt( &( floorKey[4] ) );
+                
+            timeSec_t lastLookTime = dbLookTimeGet( x, y );
+
+            if( curTime - lastLookTime > longTermCullingSeconds ) {
+                // stale
+
+                if( noCullItemList.getElementIndex( floorID ) == -1 ) {
+                    // not on our no-cull list
+                    
+                    setMapFloor( x, y, 0 );
+                    }
+                }
+            }
+        }
+    }
